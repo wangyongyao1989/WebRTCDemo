@@ -7,29 +7,69 @@
     android:padding="16dp"
     tools:showIn="@layout/activity_main">
 
-    <ScrollView
+    <TextView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_marginTop="48dp">
+        android:layout_marginTop="32dp"
+        android:gravity="center"
+        android:text="WebRTC 视频通话"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="24dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical">
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="信令服务器地址"
+                android:textStyle="bold" />
+
+            <EditText
+                android:id="@+id/et_server"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="ws://10.0.2.2:3000"
+                android:inputType="textUri"
+                android:text="ws://10.0.2.2:3000" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:text="房间号"
+                android:textStyle="bold" />
+
             <EditText
                 android:id="@+id/et_room"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="房间号"
-                android:text="666555"/>
+                android:hint="房间号（两端填相同值即可互通）"
+                android:inputType="number"
+                android:text="666555" />
+
             <Button
                 android:id="@+id/button"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginTop="20dp"
-                android:onClick="JoinRoom"
-                android:text="加入房间"
-                />
+                android:layout_marginTop="24dp"
+                android:text="加入房间" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="24dp"
+                android:text="说明：\n1. 先在宿主机运行 server.py（端口 3000）\n2. 模拟器用 ws://10.0.2.2:3000\n3. 真机用宿主机局域网 IP，如 ws://192.168.x.x:3000\n4. 两台设备加入同一房间号即可建立视频通话\n5. 点击右上角小窗可在本地/远端画面间切换（画中画）"
+                android:textColor="#888888"
+                android:textSize="12sp" />
         </LinearLayout>
     </ScrollView>
 </LinearLayout>

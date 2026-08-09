@@ -26,18 +26,14 @@ android {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
     }
-    externalNativeBuild {
-        cmake {
-            path file('src/main/cpp/CMakeLists.txt')
-            version '3.22.1'
-        }
-    }
     buildFeatures {
         viewBinding true
     }
 }
 
 dependencies {
+    // WebRTC 相关能力全部下沉到 webrtclib 模块
+    implementation project(':webrtclib')
 
     implementation libs.appcompat
     implementation libs.material
@@ -45,13 +41,4 @@ dependencies {
     testImplementation libs.junit
     androidTestImplementation libs.ext.junit
     androidTestImplementation libs.espresso.core
-    
-    // WebRTC - 使用社区维护版本
-    implementation 'io.github.webrtc-sdk:android:125.6422.02'
-    
-    // WebSocket
-    implementation 'org.java-websocket:Java-WebSocket:1.5.3'
-    
-    // JSON
-    implementation 'com.alibaba:fastjson:1.1.72.android'
 }
