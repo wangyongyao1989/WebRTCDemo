@@ -33,11 +33,26 @@ android {
             version = "3.22.1"
         }
     }
+
+    // WebRTC 预编译 .so 存放在 jniLibs/<abi>/ 下（由自编译脚本产出或使用随附版本）
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDirs("src/main/jniLibs")
+        }
+    }
 }
 
 dependencies {
-    // WebRTC / WebSocket / JSON 通过 api 暴露给宿主 app，便于 UI 层直接使用 org.webrtc 类型
-    api("io.github.webrtc-sdk:android:125.6422.02")
+    // ===================================================================
+    // [已注释] 原先通过 Maven 引入的预编译 WebRTC 包。
+    // 现已改为「本地 .so + 本地 org.webrtc Java 源码」的方式，
+    // .so 位于 src/main/jniLibs/<abi>/libjingle_peerconnection_so.so，
+    // Java 源码位于 src/main/java/org/webrtc/。
+    // 如需恢复 Maven 方式，取消下面两行注释即可（并删除本地 jniLibs/java 源码）。
+    // -------------------------------------------------------------------
+    // api("io.github.webrtc-sdk:android:125.6422.02")
+    // ===================================================================
+
     api("org.java-websocket:Java-WebSocket:1.5.3")
     api("com.alibaba:fastjson:1.1.72.android")
 
