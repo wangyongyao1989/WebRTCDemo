@@ -138,8 +138,21 @@ public class CallActivity extends AppCompatActivity implements WebRTCEventListen
     // ============================ WebRTCEventListener ============================
 
     @Override
+    public void onSignalConnecting() {
+        runOnUiThread(() -> tvStatus.setText("正在连接服务器..."));
+    }
+
+    @Override
     public void onSignalConnected() {
-        runOnUiThread(() -> tvStatus.setText("已连接服务器，等待对方加入..."));
+        runOnUiThread(() -> tvStatus.setText("已连接服务器，正在加入房间..."));
+    }
+
+    @Override
+    public void onSignalClosed() {
+        runOnUiThread(() -> {
+            tvStatus.setText("服务器连接已断开");
+            Toast.makeText(this, "服务器连接已断开", Toast.LENGTH_SHORT).show();
+        });
     }
 
     @Override

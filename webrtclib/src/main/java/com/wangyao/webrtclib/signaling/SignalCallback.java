@@ -12,6 +12,9 @@ public interface SignalCallback {
     /** WebSocket 已连接。 */
     void onSignalOpen();
 
+    /** WebSocket 已断开。 */
+    void onSignalClose();
+
     /** 收到 _peers：本机 myId 及房间内已存在的连接列表。 */
     void onPeers(java.util.List<String> connections, String myId);
 

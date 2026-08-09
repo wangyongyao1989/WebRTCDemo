@@ -34,8 +34,14 @@ import java.util.concurrent.Executors;
 public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback {
 
     public interface PeerManagerListener {
+        /** 信令通道正在连接。 */
+        void onSignalConnecting();
+
         /** 信令通道已连接。 */
         void onSignalConnected();
+
+        /** 信令通道已断开。 */
+        void onSignalClosed();
 
         /** 已加入房间，myId 为本机 socketId。 */
         void onJoinedRoom(String myId);
@@ -81,7 +87,14 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
 
     @Override
     public void onSignalOpen() {
+        Log.i(TAG, "onSignalOpen");
         if (listener != null) listener.onSignalConnected();
+    }
+
+    @Override
+    public void onSignalClose() {
+        Log.i(TAG, "onSignalClose");
+        if (listener != null) listener.onSignalClosed();
     }
 
     @Override

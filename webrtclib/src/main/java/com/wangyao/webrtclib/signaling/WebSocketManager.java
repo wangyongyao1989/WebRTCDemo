@@ -68,19 +68,21 @@ public class WebSocketManager {
         mWebSocketClient = new WebSocketClient(uri) {
             @Override
             public void onOpen(ServerHandshake handshakedata) {
-                Log.i(TAG, "WebSocket onOpen, code=" + handshakedata.getHttpStatus());
+                Log.i(TAG, "WebSocket onOpen, status=" + handshakedata.getHttpStatus() + ", message=" + handshakedata.getHttpStatusMessage());
                 joinRoom(roomId);
                 if (callback != null) callback.onSignalOpen();
             }
 
             @Override
             public void onMessage(String message) {
+                Log.d(TAG, "WebSocket onMessage: " + message);
                 handleMessage(message);
             }
 
             @Override
             public void onClose(int code, String reason, boolean remote) {
                 Log.w(TAG, "WebSocket onClose code=" + code + ", reason=" + reason + ", remote=" + remote);
+                if (callback != null) callback.onSignalClose();
             }
 
             @Override

@@ -7,9 +7,19 @@ package com.wangyao.webrtclib;
 public interface WebRTCEventListener {
 
     /**
+     * 信令通道正在连接。
+     */
+    void onSignalConnecting();
+
+    /**
      * 信令通道已连接（WebSocket 握手成功）。
      */
     void onSignalConnected();
+
+    /**
+     * 信令通道已断开。
+     */
+    void onSignalClosed();
 
     /**
      * 加入房间成功，myId 为服务器分配的本机 socketId。

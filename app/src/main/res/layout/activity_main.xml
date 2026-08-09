@@ -37,9 +37,9 @@
                 android:id="@+id/et_server"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="ws://10.0.2.2:3000"
+                android:hint="ws://192.168.43.104:3000"
                 android:inputType="textUri"
-                android:text="ws://10.0.2.2:3000" />
+                android:text="ws://192.168.43.104:3000" />
 
             <TextView
                 android:layout_width="match_parent"

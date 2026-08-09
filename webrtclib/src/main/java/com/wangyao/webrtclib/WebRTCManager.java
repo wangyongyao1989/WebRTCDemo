@@ -157,6 +157,7 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
             return;
         }
         Log.i(TAG, "connect: " + serverUrl + ", room=" + roomId);
+        if (listener != null) listener.onSignalConnecting();
         socketManager.connect(serverUrl, roomId);
     }
 
@@ -263,8 +264,18 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
     // ============================ PeerManagerListener ============================
 
     @Override
+    public void onSignalConnecting() {
+        if (listener != null) listener.onSignalConnecting();
+    }
+
+    @Override
     public void onSignalConnected() {
         if (listener != null) listener.onSignalConnected();
+    }
+
+    @Override
+    public void onSignalClosed() {
+        if (listener != null) listener.onSignalClosed();
     }
 
     @Override
