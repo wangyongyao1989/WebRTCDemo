@@ -13,3 +13,11 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+server.log
+/.idea/AndroidProjectSystem.xml
+/.idea/appInsightsSettings.xml
+/.idea/markdown.xml
+/.idea/planningMode.xml
+/.idea/runConfigurations.xml
+/.idea/studiobot.xml
