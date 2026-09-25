@@ -54,6 +54,8 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
     /** 远端描述设置前到达的 ICE 候选暂存队列。 */
     private volatile List<IceCandidate> queuedRemoteCandidates;
     private SessionDescription localSdp;
+    /** Unified Plan 下 onAddTrack 会触发多次，远端流就绪只上抛一次。 */
+    private volatile boolean remoteStreamNotified = false;
 
     public MediaStream remoteStream;
     public SurfaceViewRenderer renderer;
@@ -75,7 +77,15 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     public void addLocalStream(MediaStream localStream) {
         if (pc == null || localStream == null) return;
-        pc.addStream(localStream);
+        // Unified Plan（新版 WebRTC 默认语义）下 addStream 会触发 native CHECK 崩溃，
+        // 必须逐轨道使用 addTrack(track, streamIds)。
+        java.util.List<String> streamIds = java.util.Collections.singletonList(localStream.getId());
+        for (org.webrtc.AudioTrack track : localStream.audioTracks) {
+            pc.addTrack(track, streamIds);
+        }
+        for (VideoTrack track : localStream.videoTracks) {
+            pc.addTrack(track, streamIds);
+        }
     }
 
     public void createOffer(MediaConstraints constraints) {
@@ -265,6 +275,23 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     @Override
     public void onAddTrack(RtpReceiver receiver, MediaStream[] mediaStreams) {
+        // Unified Plan 下远端每个轨道各回调一次（onAddStream 不再触发）。
+        MediaStream stream = (mediaStreams != null && mediaStreams.length > 0) ? mediaStreams[0] : null;
+        if (stream == null) return;
+        if (receiver != null && receiver.track() instanceof org.webrtc.AudioTrack) {
+            ((org.webrtc.AudioTrack) receiver.track()).setEnabled(true);
+        }
+        remoteStream = stream;
+        Log.i(TAG, "onAddTrack: " + userId + ", track="
+                + (receiver != null && receiver.track() != null ? receiver.track().kind() : "?")
+                + ", video=" + stream.videoTracks.size() + ", audio=" + stream.audioTracks.size());
+        if (!remoteStreamNotified && !stream.videoTracks.isEmpty()) {
+            remoteStreamNotified = true;
+            if (sink != null) {
+                stream.videoTracks.get(0).addSink(sink);
+            }
+            callback.onRemoteStream(userId);
+        }
     }
 
     // ----------------------------- 内部方法 -----------------------------

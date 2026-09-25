@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>WebRTC 信令协议测试客户端</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  h2 { font-weight: 500; }
+  .videos { display: flex; gap: 12px; margin: 12px 0; }
+  video { width: 400px; height: 260px; background: #000; border-radius: 8px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 12px; }
+  input { padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
+  button { padding: 8px 16px; border-radius: 6px; border: none; background: #0e7c31; color: #fff; cursor: pointer; }
+  #log { background: #111; padding: 12px; border-radius: 8px; height: 280px; overflow-y: auto;
+         font-family: Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
+  #status { margin: 8px 0; font-size: 14px; }
+  .ok { color: #4ade80; } .err { color: #f87171; }
+</style>
+</head>
+<body>
+<h2>WebRTC 信令协议测试客户端（双人通话第二端）</h2>
+<div class="bar">
+  <input id="server" size="30" value="ws://127.0.0.1:3000">
+  <input id="room" size="12" value="test123">
+  <button onclick="join()">加入房间</button>
+  <button onclick="hangup()" style="background:#b91c1c">挂断</button>
+</div>
+<div id="status">未连接</div>
+<div class="videos">
+  <div><video id="local" autoplay muted playsinline></video><br>本地画面</div>
+  <div><video id="remote" autoplay playsinline></video><br>远端画面（平板）</div>
+</div>
+<div id="log"></div>
+
+<script>
+// 协议与 server.py / WebSocketManager.java 完全一致：
+//   发送: __join / __offer / __answer / __ice_candidate
+//   接收: _peers / _new_peer / _offer / _answer / _ice_candidate / _remove_peer
+// 信令模型：新加入者主动向房间内已有用户发起 Offer（呼叫方）。
+let ws = null, myId = null, pc = null, localStream = null;
+const peersWaitingOffer = new Set(); // 房间内已有用户（我方先加入时等待其 Offer）
+
+const $ = id => document.getElementById(id);
+function log(msg, cls) {
+  const el = $('log');
+  el.textContent += `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+  el.scrollTop = el.scrollHeight;
+  if (cls) $('status').className = cls;
+}
+
+// 优先真实摄像头；权限被自动化环境阻塞时回退为 canvas 合成视频 + 音频振荡器，
+// 同样产生真实 RTP 流，可完整验证信令与 P2P 媒体链路。
+async function getInputStream() {
+  try {
+    const p = navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('权限等待超时')), 2500));
+    const s = await Promise.race([p, timeout]);
+    log('已获取真实摄像头/麦克风');
+    return s;
+  } catch (e) {
+    log(`摄像头不可用(${e.message})，使用合成测试画面`);
+    const c = document.createElement('canvas');
+    c.width = 640; c.height = 480;
+    const ctx = c.getContext('2d');
+    let n = 0;
+    setInterval(() => {
+      n++;
+      ctx.fillStyle = '#101828'; ctx.fillRect(0, 0, 640, 480);
+      ctx.fillStyle = '#22c55e'; ctx.font = 'bold 56px monospace';
+      ctx.fillText('BROWSER-' + n, 60, 240);
+      ctx.fillStyle = '#fff'; ctx.font = '24px monospace';
+      ctx.fillText(new Date().toLocaleTimeString(), 60, 300);
+    }, 200);
+    const stream = c.captureStream(5);
+    try {
+      const ac = new AudioContext();
+      const osc = ac.createOscillator();
+      const dest = ac.createMediaStreamDestination();
+      osc.frequency.value = 330;
+      osc.connect(dest); osc.start();
+      dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+    } catch (e2) { log('音频合成失败: ' + e2.message); }
+    return stream;
+  }
+}
+
+async function join() {
+  localStream = await getInputStream();
+  $('local').srcObject = localStream;
+  myId = null; pc = null; peersWaitingOffer.clear();
+
+  ws = new WebSocket($('server').value);
+  ws.onopen = () => {
+    log('WebSocket 已连接，发送 __join');
+    send('__join', { room: $('room').value });
+  };
+  ws.onmessage = e => handle(JSON.parse(e.data));
+  ws.onclose = () => { log('信令连接关闭', 'err'); $('status').textContent = '连接已关闭'; };
+  ws.onerror = () => log('WebSocket 错误', 'err');
+}
+
+function send(eventName, data) {
+  ws && ws.readyState === 1 && ws.send(JSON.stringify({ eventName, data }));
+}
+
+async function handle(msg) {
+  const ev = msg.eventName, d = msg.data || {};
+  log(`<< ${ev} ${JSON.stringify(d).slice(0, 120)}`);
+  switch (ev) {
+    case '_peers': {
+      myId = d.you;
+      const conns = d.connections || [];
+      $('status').textContent = `已加入房间，本端id=${myId?.slice(0,8)}，房间已有 ${conns.length} 人`;
+      for (const peerId of conns) await createPeer(peerId, true); // 新加入者发起 Offer
+      break;
+    }
+    case '_new_peer':
+      // 对方加入房间，由对方发起 Offer，此处仅登记
+      peersWaitingOffer.add(d.socketId);
+      log(`等待新用户 ${d.socketId?.slice(0,8)} 发起 Offer`);
+      break;
+    case '_offer':
+      await createPeer(d.socketId, false);
+      await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      send('__answer', { socketId: d.socketId, sdp: { type: 'answer', sdp: pc.localDescription.sdp } });
+      log('已发送 Answer >>');
+      break;
+    case '_answer':
+      await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
+      log('已设置远端 Answer');
+      break;
+    case '_ice_candidate':
+      if (pc) await pc.addIceCandidate(new RTCIceCandidate({
+        candidate: d.candidate, sdpMid: d.id || '0', sdpMLineIndex: d.sdpMLineIndex ?? d.label ?? 0
+      }));
+      break;
+    case '_remove_peer':
+      log(`对方 ${d.socketId?.slice(0,8)} 已离开`, 'err');
+      $('status').textContent = '对方已离开';
+      break;
+  }
+}
+
+async function createPeer(peerId, initiator) {
+  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+  pc.onicecandidate = e => {
+    if (e.candidate) send('__ice_candidate', {
+      socketId: peerId, id: e.candidate.sdpMid, label: e.candidate.sdpMLineIndex,
+      candidate: e.candidate.candidate
+    });
+  };
+  pc.ontrack = e => { $('remote').srcObject = e.streams[0]; log('>> 收到远端媒体轨道', 'ok'); };
+  pc.onconnectionstatechange = () => {
+    log(`PeerConnection 状态: ${pc.connectionState}`);
+    $('status').textContent = `连接状态: ${pc.connectionState}`;
+    $('status').className = pc.connectionState === 'connected' ? 'ok' : '';
+  };
+  if (initiator) {
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    send('__offer', { socketId: peerId, sdp: { type: 'offer', sdp: offer.sdp } });
+    log(`已向 ${peerId.slice(0,8)} 发送 Offer >>`);
+  }
+}
+
+function hangup() {
+  pc?.close(); ws?.close();
+  localStream?.getTracks().forEach(t => t.stop());
+  $('remote').srcObject = null; $('status').textContent = '已挂断';
+}
+</script>
+</body>
+</html>

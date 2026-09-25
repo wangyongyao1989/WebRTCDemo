@@ -138,7 +138,7 @@ WebRtc/
 
 ### 4. 线程模型
 - `PeerConnectionManager` 使用单线程 `ExecutorService` 执行所有 `PeerConnection` 操作，保证线程安全。
-- WebRTC 回调（`onAddStream` 等）来自 WebRTC 内部线程，UI 更新通过 `runOnUiThread` 切换到主线程。
+- WebRTC 回调（`onAddTrack` 等）来自 WebRTC 内部线程，UI 更新通过 `runOnUiThread` 切换到主线程。
 
 ### 5. Native C++ 代码（为自编译 WebRTC .so 做准备）
 
@@ -192,5 +192,6 @@ WebRtc/
 ## 五、注意事项与扩展点
 - 模拟器与真机互通时，服务器地址需填宿主机的局域网 IP，且确保防火墙放行 3000 端口。
 - 当前仅用公共 STUN（`stun:stun.l.google.com:19302`）；跨网络 NAT 穿透需在 `WebRTCManager.buildIceServers()` 追加 TURN 服务器。
-- ICE 协商默认使用 `addStream`/`onAddStream`（与现有信令兼容，验证可用），后续可平滑迁移到 `addTrack`/`onAddTrack`。
+- ICE 协商使用 `addTrack`/`onAddTrack`（Unified Plan）。注意：新版 WebRTC（本地 GetStream .so 与 Maven 125 均实测）已移除 Plan B，`PeerConnection.addStream()` 会触发 native `Check failed: !IsUnifiedPlan()` 直接 abort，禁止改回旧 API。
+- 无第二台 Android 设备时，可用 `test-client/browser-peer.html`（Chrome 打开，配合 `python3 -m http.server 8080`）作为浏览器端第二通话方，信令协议与 `WebSocketManager.java` 完全一致。
 - 多人房间（>2 人）已具备基础支持（每个 peer 独立 Peer），UI 当前为双人画中画，可在此基础上扩展多宫格。
