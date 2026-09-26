@@ -60,6 +60,13 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     /** 远端描述未就绪（非 STABLE）时到达的 ICE 候选暂存队列；重协商期间同样复用。 */
     private final List<IceCandidate> remoteCandidateQueue = new ArrayList<>();
+    /**
+     * ICE 候选队列专用锁。刻意不用 Peer 监视器(this)：
+     * addRemoteIceCandidate 在信令/执行线程调用 pc.signalingState() 等同步 JNI 时会阻塞等待信令线程，
+     * 而信令线程的 onSetSuccess->drainCandidates 回调又要拿同一把锁；若共用 this 监视器会形成
+     * 「执行线程持锁等信令线程 / 信令线程等锁」的死锁。故：独立锁 + 任何 pc.* native 调用都在锁外执行。
+     */
+    private final Object iceLock = new Object();
     private SessionDescription localSdp;
     /** Unified Plan 下 onAddTrack 会触发多次，远端流就绪只上抛一次。 */
     private volatile boolean remoteStreamNotified = false;
@@ -107,14 +114,21 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
     }
 
     /** 添加远端 ICE 候选：信令非 STABLE（协商/重协商进行中）时入队，否则直接添加。 */
-    public synchronized void addRemoteIceCandidate(IceCandidate candidate) {
+    public void addRemoteIceCandidate(IceCandidate candidate) {
         if (pc == null) return;
-        if (pc.signalingState() == PeerConnection.SignalingState.STABLE
-                && remoteCandidateQueue.isEmpty()) {
-            pc.addIceCandidate(candidate);
-        } else {
-            remoteCandidateQueue.add(candidate);
+        // 关键：signalingState() 是同步 JNI，必须在锁外读取，避免与信令线程回调互相等待而死锁。
+        PeerConnection.SignalingState st = pc.signalingState();
+        boolean addNow;
+        synchronized (iceLock) {
+            if (st == PeerConnection.SignalingState.STABLE && remoteCandidateQueue.isEmpty()) {
+                addNow = true;
+            } else {
+                remoteCandidateQueue.add(candidate);
+                addNow = false;
+            }
         }
+        // native 调用在锁外进行
+        if (addNow) pc.addIceCandidate(candidate);
     }
 
     /** ICE 重启 + 重新发起 Offer（弱网断连恢复用，仅呼叫角色可调用）。 */
@@ -335,13 +349,18 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     // ----------------------------- 内部方法 -----------------------------
 
-    private synchronized void drainCandidates() {
-        if (remoteCandidateQueue.isEmpty()) return;
-        Log.d(TAG, "drainCandidates: " + userId + ", count=" + remoteCandidateQueue.size());
-        for (IceCandidate c : remoteCandidateQueue) {
+    private void drainCandidates() {
+        List<IceCandidate> pending;
+        synchronized (iceLock) {
+            if (remoteCandidateQueue.isEmpty()) return;
+            pending = new ArrayList<>(remoteCandidateQueue);
+            remoteCandidateQueue.clear();
+        }
+        Log.d(TAG, "drainCandidates: " + userId + ", count=" + pending.size());
+        // pc.addIceCandidate 在锁外调用（本方法运行于信令线程，持锁跨 native 调用会放大死锁面）
+        for (IceCandidate c : pending) {
             if (pc != null) pc.addIceCandidate(c);
         }
-        remoteCandidateQueue.clear();
     }
 
     private MediaConstraints offerOrAnswerConstraints() {

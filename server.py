@@ -30,13 +30,16 @@ async def handle_connection(websocket):
                     if room not in rooms:
                         rooms[room] = []
                     
-                    # 通知房间内其他用户
-                    for existing_id in rooms[room]:
+                    # 通知房间内其他用户（逐个容错，避免僵尸连接中断入房流程）
+                    for existing_id in list(rooms[room]):
                         if existing_id != client_id:
-                            await sockets[existing_id].send(json.dumps({
-                                "eventName": "_new_peer",
-                                "data": {"socketId": client_id}
-                            }))
+                            try:
+                                await sockets[existing_id].send(json.dumps({
+                                    "eventName": "_new_peer",
+                                    "data": {"socketId": client_id}
+                                }))
+                            except Exception as e:
+                                print(f"通知 _new_peer 失败({existing_id}): {e}")
                     
                     # 将新用户加入房间
                     rooms[room].append(client_id)
@@ -96,25 +99,30 @@ async def handle_connection(websocket):
                 print(f"处理消息时出错: {e}")
     
     finally:
-        # 连接关闭时清理
+        # 连接关闭时清理。注意：必须先从状态表中移除，再逐个通知；
+        # 任何一次 send 失败（对端半死连接抛 ConnectionClosed）都不能中断清理，
+        # 否则离房者会以僵尸身份残留在 rooms/sockets，导致重进房间后成员列表错乱。
         print(f"连接关闭: {client_id}")
-        # 从所有房间中移除
+        left_rooms = []
+        # 先从所有房间中移除
         for room, room_clients in list(rooms.items()):
             if client_id in room_clients:
                 room_clients.remove(client_id)
-                # 通知房间内其他用户
-                for other_id in room_clients:
-                    if other_id in sockets:
+                left_rooms.append(room)
+                # 通知房间内其他用户（逐个容错）
+                for other_id in list(room_clients):
+                    try:
                         await sockets[other_id].send(json.dumps({
                             "eventName": "_remove_peer",
                             "data": {"socketId": client_id}
                         }))
+                    except Exception as e:
+                        print(f"通知 _remove_peer 失败({other_id}): {e}")
                 # 如果房间为空，删除房间
                 if not room_clients:
                     del rooms[room]
         # 从连接列表中移除
-        if client_id in sockets:
-            del sockets[client_id]
+        sockets.pop(client_id, None)
 
 async def main():
     # 启动WebSocket服务器

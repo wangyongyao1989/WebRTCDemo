@@ -267,6 +267,8 @@ NO_PROXY='*' python3 test-client/cdp-drive.py status   # 读 ICE/码率/丢包
 - 模拟器与真机互通时，服务器地址需填宿主机的局域网 IP，且确保防火墙放行 3000 端口。宿主机的局域网 IP 可能因 DHCP 变化（App 显示「服务器连接已断开」先检查此项），变更后需同步修改 App 输入框与 `weaknet.sh` 中的 `MAC_IP`。
 - 当前仅用公共 STUN（`stun:stun.l.google.com:19302`）；跨网络 NAT 穿透需在 `WebRTCManager.buildIceServers()` 追加 TURN 服务器。
 - ICE 协商使用 `addTrack`/`onAddTrack`（Unified Plan）。注意：新版 WebRTC（本地 GetStream .so 与 Maven 125 均实测）已移除 Plan B，`PeerConnection.addStream()` 会触发 native `Check failed: !IsUnifiedPlan()` 直接 abort，禁止改回旧 API。
+- 线程锁约束：`Peer` 的 ICE 候选队列用独立 `iceLock` 保护，且**严禁持有 Java 锁时调用 `pc.signalingState()`/`addIceCandidate()` 等同步 JNI**——信令线程的 `onSetSuccess→drainCandidates` 回调需要同一把锁，持锁跨 native 调用会造成「执行线程持锁等信令线程、信令线程等锁」的死锁（曾表现为挂断重进房间后画面不显示、App ANR；ANR 栈可在设备上 `dumpsys dropbox --print data_app_anr` 查阅）。
+- 信令服务器 `server.py` 的连接清理对每个成员的 `send` 逐个容错：离房通知中途抛异常不能中断清理，否则僵尸成员残留在 `rooms` 中，导致重进房间后成员列表错乱。
 - 无第二台 Android 设备时，用 `test-client/browser-peer.html`（Chrome + `python3 -m http.server 8080`）作为浏览器端第二通话方，信令协议与 `WebSocketManager.java` 完全一致；真实摄像头/麦克风与自动化驱动方式见「四、弱网自适应」。
 - 用 `weaknet.sh` 测完**必须** `off`：pf 保持开启或残留 dummynet 规则会拖慢本机网络；macOS 上 dummynet 规则写进 pf anchor 会被静默忽略（脚本已直接写主规则集）；长时间反复 on/off 后若发现注入不生效，执行 `sudo pfctl -d; sudo pfctl -F all` 重置。
 - 多人房间（>2 人）已具备基础支持（每个 peer 独立 Peer），UI 当前为双人画中画，可在此基础上扩展多宫格。
