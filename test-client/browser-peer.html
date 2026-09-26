@@ -8,12 +8,16 @@
   h2 { font-weight: 500; }
   .videos { display: flex; gap: 12px; margin: 12px 0; }
   video { width: 400px; height: 260px; background: #000; border-radius: 8px; }
-  .bar { display: flex; gap: 8px; margin-bottom: 12px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
   input { padding: 8px; border-radius: 6px; border: 1px solid #444; background: #222; color: #eee; }
   button { padding: 8px 16px; border-radius: 6px; border: none; background: #0e7c31; color: #fff; cursor: pointer; }
-  #log { background: #111; padding: 12px; border-radius: 8px; height: 280px; overflow-y: auto;
+  #log { background: #111; padding: 12px; border-radius: 8px; height: 240px; overflow-y: auto;
          font-family: Menlo, monospace; font-size: 12px; white-space: pre-wrap; }
   #status { margin: 8px 0; font-size: 14px; }
+  #mediaBadge { padding: 4px 10px; border-radius: 999px; font-size: 12px; }
+  .badge-real { background: #14532d; color: #bbf7d0; }
+  .badge-synth { background: #713f12; color: #fde68a; }
+  #stats { font-family: Menlo, monospace; font-size: 12px; color: #93c5fd; margin: 6px 0; min-height: 16px; }
   .ok { color: #4ade80; } .err { color: #f87171; }
 </style>
 </head>
@@ -24,8 +28,10 @@
   <input id="room" size="12" value="test123">
   <button onclick="join()">加入房间</button>
   <button onclick="hangup()" style="background:#b91c1c">挂断</button>
+  <span id="mediaBadge">未获取媒体</span>
 </div>
 <div id="status">未连接</div>
+<div id="stats"></div>
 <div class="videos">
   <div><video id="local" autoplay muted playsinline></video><br>本地画面</div>
   <div><video id="remote" autoplay playsinline></video><br>远端画面（平板）</div>
@@ -37,8 +43,13 @@
 //   发送: __join / __offer / __answer / __ice_candidate
 //   接收: _peers / _new_peer / _offer / _answer / _ice_candidate / _remove_peer
 // 信令模型：新加入者主动向房间内已有用户发起 Offer（呼叫方）。
-let ws = null, myId = null, pc = null, localStream = null;
-const peersWaitingOffer = new Set(); // 房间内已有用户（我方先加入时等待其 Offer）
+// 弱网测试要点：
+//   - 每个 peerId 复用一个 RTCPeerConnection（Map 管理），App 端 restartIce
+//     重协商时走 setRemoteDescription(新OFFER)->createAnswer 流程，不重建连接。
+//   - 每 2s 轮询 getStats 打印收发码率/丢包，作为降级/恢复的观测证据。
+let ws = null, myId = null, localStream = null;
+const pcs = new Map();        // peerId(socketId) -> RTCPeerConnection
+let statsTimer = null;
 
 const $ = id => document.getElementById(id);
 function log(msg, cls) {
@@ -47,47 +58,62 @@ function log(msg, cls) {
   el.scrollTop = el.scrollHeight;
   if (cls) $('status').className = cls;
 }
+function setBadge(text, real) {
+  const b = $('mediaBadge');
+  b.textContent = text;
+  b.className = real ? 'badge-real' : 'badge-synth';
+}
 
-// 优先真实摄像头；权限被自动化环境阻塞时回退为 canvas 合成视频 + 音频振荡器，
-// 同样产生真实 RTP 流，可完整验证信令与 P2P 媒体链路。
+// 优先真实摄像头/麦克风；仅在权限被拒或超时才回退 canvas 合成视频 + 振荡器音频。
 async function getInputStream() {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return synthStream('浏览器不支持 getUserMedia');
+  }
   try {
-    const p = navigator.mediaDevices.getUserMedia({ audio: true, video: true });
-    const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('权限等待超时')), 2500));
-    const s = await Promise.race([p, timeout]);
-    log('已获取真实摄像头/麦克风');
+    const s = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true },
+      video: { width: { ideal: 640 }, height: { ideal: 480 }, facingMode: 'user' }
+    });
+    setBadge('真实摄像头/麦克风', true);
+    log('已获取真实摄像头/麦克风: ' + s.getTracks().map(t => t.kind + '(' + t.label + ')').join(', '));
     return s;
   } catch (e) {
-    log(`摄像头不可用(${e.message})，使用合成测试画面`);
-    const c = document.createElement('canvas');
-    c.width = 640; c.height = 480;
-    const ctx = c.getContext('2d');
-    let n = 0;
-    setInterval(() => {
-      n++;
-      ctx.fillStyle = '#101828'; ctx.fillRect(0, 0, 640, 480);
-      ctx.fillStyle = '#22c55e'; ctx.font = 'bold 56px monospace';
-      ctx.fillText('BROWSER-' + n, 60, 240);
-      ctx.fillStyle = '#fff'; ctx.font = '24px monospace';
-      ctx.fillText(new Date().toLocaleTimeString(), 60, 300);
-    }, 200);
-    const stream = c.captureStream(5);
-    try {
-      const ac = new AudioContext();
-      const osc = ac.createOscillator();
-      const dest = ac.createMediaStreamDestination();
-      osc.frequency.value = 330;
-      osc.connect(dest); osc.start();
-      dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
-    } catch (e2) { log('音频合成失败: ' + e2.message); }
-    return stream;
+    return synthStream(e.name + ': ' + e.message);
   }
+}
+
+function synthStream(reason) {
+  log(`摄像头/麦克风不可用(${reason})，使用合成测试画面`, 'err');
+  setBadge('合成画面（权限被拒）', false);
+  const c = document.createElement('canvas');
+  c.width = 640; c.height = 480;
+  const ctx = c.getContext('2d');
+  let n = 0;
+  setInterval(() => {
+    n++;
+    ctx.fillStyle = '#101828'; ctx.fillRect(0, 0, 640, 480);
+    ctx.fillStyle = '#22c55e'; ctx.font = 'bold 56px monospace';
+    ctx.fillText('BROWSER-' + n, 60, 240);
+    ctx.fillStyle = '#fff'; ctx.font = '24px monospace';
+    ctx.fillText(new Date().toLocaleTimeString(), 60, 300);
+  }, 200);
+  const stream = c.captureStream(5);
+  try {
+    const ac = new AudioContext();
+    const osc = ac.createOscillator();
+    const dest = ac.createMediaStreamDestination();
+    osc.frequency.value = 330;
+    osc.connect(dest); osc.start();
+    dest.stream.getAudioTracks().forEach(t => stream.addTrack(t));
+  } catch (e2) { log('音频合成失败: ' + e2.message); }
+  return stream;
 }
 
 async function join() {
   localStream = await getInputStream();
   $('local').srcObject = localStream;
-  myId = null; pc = null; peersWaitingOffer.clear();
+  myId = null;
+  pcs.forEach(p => p.close()); pcs.clear();
 
   ws = new WebSocket($('server').value);
   ws.onopen = () => {
@@ -97,6 +123,7 @@ async function join() {
   ws.onmessage = e => handle(JSON.parse(e.data));
   ws.onclose = () => { log('信令连接关闭', 'err'); $('status').textContent = '连接已关闭'; };
   ws.onerror = () => log('WebSocket 错误', 'err');
+  startStatsPolling();
 }
 
 function send(eventName, data) {
@@ -105,46 +132,65 @@ function send(eventName, data) {
 
 async function handle(msg) {
   const ev = msg.eventName, d = msg.data || {};
-  log(`<< ${ev} ${JSON.stringify(d).slice(0, 120)}`);
   switch (ev) {
     case '_peers': {
       myId = d.you;
       const conns = d.connections || [];
+      log(`<< _peers you=${myId?.slice(0,8)} 房间已有 ${conns.length} 人`);
       $('status').textContent = `已加入房间，本端id=${myId?.slice(0,8)}，房间已有 ${conns.length} 人`;
       for (const peerId of conns) await createPeer(peerId, true); // 新加入者发起 Offer
       break;
     }
     case '_new_peer':
       // 对方加入房间，由对方发起 Offer，此处仅登记
-      peersWaitingOffer.add(d.socketId);
-      log(`等待新用户 ${d.socketId?.slice(0,8)} 发起 Offer`);
+      log(`>> 新用户 ${d.socketId?.slice(0,8)}，等待其发起 Offer`);
       break;
-    case '_offer':
-      await createPeer(d.socketId, false);
+    case '_offer': {
+      // 复用已有 pc 即构成 renegotiation（含 App 端 restartIce 后的新 Offer）
+      const pc = getOrCreatePeer(d.socketId);
+      const prevStable = pc.signalingState === 'stable';
+      if (!prevStable) log('收到重协商 Offer（signalingState=' + pc.signalingState + '）');
       await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
       send('__answer', { socketId: d.socketId, sdp: { type: 'answer', sdp: pc.localDescription.sdp } });
-      log('已发送 Answer >>');
+      log('已发送 Answer >>' + (prevStable ? '' : '（重协商）'));
       break;
-    case '_answer':
-      await pc.setRemoteDescription(new RTCSessionDescription(d.sdp));
-      log('已设置远端 Answer');
+    }
+    case '_answer': {
+      const pc = pcs.get(d.socketId);
+      if (pc) { await pc.setRemoteDescription(new RTCSessionDescription(d.sdp)); log('已设置远端 Answer'); }
       break;
-    case '_ice_candidate':
-      if (pc) await pc.addIceCandidate(new RTCIceCandidate({
+    }
+    case '_ice_candidate': {
+      const pc = pcs.get(d.socketId);
+      if (pc && d.candidate) await pc.addIceCandidate(new RTCIceCandidate({
         candidate: d.candidate, sdpMid: d.id || '0', sdpMLineIndex: d.sdpMLineIndex ?? d.label ?? 0
       }));
       break;
+    }
     case '_remove_peer':
       log(`对方 ${d.socketId?.slice(0,8)} 已离开`, 'err');
+      // 对端离会：关闭并移除其 pc，避免残留连接污染状态/统计
+      const old = pcs.get(d.socketId);
+      if (old) { old.close(); pcs.delete(d.socketId); }
+      lastStats = null;
       $('status').textContent = '对方已离开';
       break;
   }
 }
 
-async function createPeer(peerId, initiator) {
-  pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+function getOrCreatePeer(peerId) {
+  let pc = pcs.get(peerId);
+  if (!pc) {
+    pc = newPeer(peerId);
+    pcs.set(peerId, pc);
+  }
+  return pc;
+}
+
+function newPeer(peerId) {
+  const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
   localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
   pc.onicecandidate = e => {
     if (e.candidate) send('__ice_candidate', {
@@ -152,12 +198,20 @@ async function createPeer(peerId, initiator) {
       candidate: e.candidate.candidate
     });
   };
-  pc.ontrack = e => { $('remote').srcObject = e.streams[0]; log('>> 收到远端媒体轨道', 'ok'); };
+  pc.ontrack = e => {
+    if ($('remote').srcObject !== e.streams[0]) { $('remote').srcObject = e.streams[0]; log('>> 收到远端媒体轨道', 'ok'); }
+  };
+  pc.oniceconnectionstatechange = () => log(`ICE 状态: ${pc.iceConnectionState}`);
   pc.onconnectionstatechange = () => {
     log(`PeerConnection 状态: ${pc.connectionState}`);
     $('status').textContent = `连接状态: ${pc.connectionState}`;
     $('status').className = pc.connectionState === 'connected' ? 'ok' : '';
   };
+  return pc;
+}
+
+async function createPeer(peerId, initiator) {
+  const pc = getOrCreatePeer(peerId);
   if (initiator) {
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -166,8 +220,45 @@ async function createPeer(peerId, initiator) {
   }
 }
 
+// ---- 统计面板：每 2s 输出收发码率与丢包（弱网降级/恢复的观测证据） ----
+let lastStats = null;
+function startStatsPolling() {
+  if (statsTimer) return;
+  statsTimer = setInterval(async () => {
+    if (pcs.size === 0) { $('stats').textContent = ''; return; }
+    const lines = [];
+    for (const [id, pc] of pcs) {
+      try {
+        const s = await pc.getStats();
+        let inBytes = 0, outBytes = 0, inPackets = 0, packetsLost = 0, inName = '', outName = '';
+        const now = performance.now();
+        s.forEach(s2 => {
+          if (s2.type === 'inbound-rtp' && s2.kind === 'video') {
+            inBytes = s2.bytesReceived || 0; inPackets = s2.packetsReceived || 0; packetsLost = s2.packetsLost || 0;
+          }
+          if (s2.type === 'outbound-rtp' && s2.kind === 'video') outBytes = s2.bytesSent || 0;
+          if (s2.type === 'candidate-pair' && s2.nominated && s2.state === 'succeeded') {
+            inName = s2.availableIncomingBitrate ? 'availIn=' + Math.round(s2.availableIncomingBitrate/1000) + 'kbps' : '';
+            outName = s2.availableOutgoingBitrate ? 'availOut=' + Math.round(s2.availableOutgoingBitrate/1000) + 'kbps' : '';
+          }
+        });
+        if (lastStats) {
+          const dt = (now - lastStats.t) / 1000;
+          const inK = Math.round((inBytes - lastStats.inBytes) * 8 / 1024 / dt);
+          const outK = Math.round((outBytes - lastStats.outBytes) * 8 / 1024 / dt);
+          const loss = Math.max(0, packetsLost - lastStats.lost);
+          lines.push(`${id.slice(0,6)} 收${inK}kbps 发${outK}kbps 丢包+${loss}/收包${inPackets - lastStats.packets} ${inName} ${outName} ice=${pc.iceConnectionState}`);
+        }
+        lastStats = { t: now, inBytes, outBytes, lost: packetsLost, packets: inPackets };
+      } catch (e) { lines.push('stats error: ' + e.message); }
+    }
+    $('stats').textContent = lines.join('\n');
+  }, 2000);
+}
+
 function hangup() {
-  pc?.close(); ws?.close();
+  pcs.forEach(p => p.close()); pcs.clear();
+  ws?.close();
   localStream?.getTracks().forEach(t => t.stop());
   $('remote').srcObject = null; $('status').textContent = '已挂断';
 }

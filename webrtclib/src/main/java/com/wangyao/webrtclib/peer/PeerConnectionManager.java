@@ -19,6 +19,9 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Peer 连接管理器：维护房间内所有 peer，衔接「信令层」与「WebRTC 媒体层」。
@@ -51,6 +54,12 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
 
         /** 远端用户离开。 */
         void onUserLeave(String userId);
+
+        /** 网络质量分级变化（弱网检测）。 */
+        void onNetworkQuality(String userId, NetworkQualityMonitor.Quality quality, String detail);
+
+        /** ICE 连接异常，正在进行第 attempt 次重启重连。 */
+        void onIceReconnecting(String userId, int attempt);
     }
 
     private static final String TAG = "PeerConnectionManager";
@@ -64,7 +73,19 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
     private final PeerManagerListener listener;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
     private final Map<String, Peer> peers = new ConcurrentHashMap<>();
+    /** 每个 peer 一个弱网质量监测器（远端流到达后启动）。 */
+    private final Map<String, NetworkQualityMonitor> monitors = new ConcurrentHashMap<>();
+    /** ICE 重启次数计数（连接恢复后清零）。 */
+    private final Map<String, Integer> iceRestartAttempts = new ConcurrentHashMap<>();
+    /** 待执行的 ICE 状态复查任务（避免重复调度）。 */
+    private final Map<String, ScheduledFuture<?>> pendingIceChecks = new ConcurrentHashMap<>();
+    private static final int MAX_ICE_RESTART = 2;
+    /** DISCONNECTED 后的宽限期：期间 WebRTC 可能自行恢复，超时未恢复才重启 ICE。 */
+    private static final long ICE_DISCONNECT_GRACE_MS = 4000;
+    /** ICE 重启后等待重协商+连通的时间，超时仍未连通则再次处理。 */
+    private static final long ICE_RESTART_VERIFY_MS = 10000;
     private String myId;
 
     public PeerConnectionManager(Context context,
@@ -180,6 +201,7 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
 
     @Override
     public void onRemoteStream(String userId) {
+        startMonitor(userId);
         if (listener != null) listener.onRemoteStreamReady(userId);
     }
 
@@ -187,6 +209,98 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
     public void onUserLeave(String userId) {
         if (listener != null) listener.onUserLeave(userId);
         executor.execute(() -> removePeer(userId));
+    }
+
+    @Override
+    public void onIceConnectionStateChanged(String userId, PeerConnection.IceConnectionState state) {
+        executor.execute(() -> handleIceState(userId, state));
+    }
+
+    // ============================ 弱网 ICE 重连状态机 ============================
+
+    /**
+     * ICE 异常处理策略：
+     *   - CONNECTED/COMPLETED：清零重启计数；
+     *   - DISCONNECTED：给 4s 宽限期（WebRTC 可自愈），仍未恢复则 restartIce；
+     *   - FAILED：立即 restartIce + 重新 Offer；
+     *   - 重启后 10s 复查，仍未连通则再试，最多 {@link #MAX_ICE_RESTART} 次，
+     *     超限才真正按离会拆链。
+     */
+    private void handleIceState(String userId, PeerConnection.IceConnectionState state) {
+        Log.i(TAG, "handleIceState: " + userId + ", " + state);
+        switch (state) {
+            case CONNECTED:
+            case COMPLETED:
+                iceRestartAttempts.remove(userId);
+                cancelPendingIceCheck(userId);
+                startMonitor(userId);
+                break;
+            case DISCONNECTED:
+                scheduleIceCheck(userId, ICE_DISCONNECT_GRACE_MS);
+                break;
+            case FAILED:
+                attemptIceRestart(userId);
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** 延迟复查 ICE 状态：仍未连通则尝试重启。 */
+    private void scheduleIceCheck(String userId, long delayMs) {
+        if (pendingIceChecks.containsKey(userId)) return; // 已有在途检查
+        ScheduledFuture<?> f = scheduler.schedule(() -> {
+            pendingIceChecks.remove(userId);
+            executor.execute(() -> {
+                Peer peer = peers.get(userId);
+                if (peer == null) return;
+                PeerConnection.IceConnectionState s = peer.iceState();
+                if (s != PeerConnection.IceConnectionState.CONNECTED
+                        && s != PeerConnection.IceConnectionState.COMPLETED) {
+                    attemptIceRestart(userId);
+                }
+            });
+        }, delayMs, TimeUnit.MILLISECONDS);
+        pendingIceChecks.put(userId, f);
+    }
+
+    private void cancelPendingIceCheck(String userId) {
+        ScheduledFuture<?> f = pendingIceChecks.remove(userId);
+        if (f != null) f.cancel(false);
+    }
+
+    private void attemptIceRestart(String userId) {
+        Peer peer = peers.get(userId);
+        if (peer == null) return;
+        int n = iceRestartAttempts.merge(userId, 1, Integer::sum);
+        if (n > MAX_ICE_RESTART) {
+            Log.e(TAG, "attemptIceRestart: 已达上限 " + MAX_ICE_RESTART + " 次，放弃重连 " + userId);
+            iceRestartAttempts.remove(userId);
+            onUserLeave(userId);
+            return;
+        }
+        Log.w(TAG, "attemptIceRestart #" + n + ": " + userId);
+        peer.restartIceAndRenegotiate();
+        if (listener != null) listener.onIceReconnecting(userId, n);
+        scheduleIceCheck(userId, ICE_RESTART_VERIFY_MS);
+    }
+
+    // ============================ 弱网质量监测 ============================
+
+    private void startMonitor(String userId) {
+        Peer peer = peers.get(userId);
+        if (peer == null || monitors.containsKey(userId)) return;
+        NetworkQualityMonitor monitor = new NetworkQualityMonitor(peer, userId,
+                (uid, quality, detail) -> {
+                    if (listener != null) listener.onNetworkQuality(uid, quality, detail);
+                });
+        monitors.put(userId, monitor);
+        monitor.start();
+    }
+
+    private void stopMonitor(String userId) {
+        NetworkQualityMonitor m = monitors.remove(userId);
+        if (m != null) m.stop();
     }
 
     // ============================ 对外方法 ============================
@@ -201,9 +315,25 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
         return peer.createRender(eglBase, context, isOverlay);
     }
 
+    /** 对所有活跃 peer 的视频 RtpSender 设置最大编码码率（弱网自适应降级/恢复）。 */
+    public void setVideoMaxBitrate(int maxBps) {
+        executor.execute(() -> {
+            for (Peer peer : peers.values()) {
+                peer.setVideoMaxBitrate(maxBps);
+            }
+        });
+    }
+
     /** 关闭所有 peer 并清空。 */
     public void closeAll() {
         executor.execute(() -> {
+            for (String id : new java.util.ArrayList<>(monitors.keySet())) {
+                stopMonitor(id);
+            }
+            for (String id : new java.util.ArrayList<>(pendingIceChecks.keySet())) {
+                cancelPendingIceCheck(id);
+            }
+            iceRestartAttempts.clear();
             for (Peer peer : peers.values()) {
                 peer.close();
             }
@@ -228,6 +358,9 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
     }
 
     private void removePeer(String socketId) {
+        stopMonitor(socketId);
+        cancelPendingIceCheck(socketId);
+        iceRestartAttempts.remove(socketId);
         Peer peer = peers.remove(socketId);
         if (peer != null) {
             peer.close();

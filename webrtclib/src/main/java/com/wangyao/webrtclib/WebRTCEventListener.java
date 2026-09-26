@@ -39,6 +39,19 @@ public interface WebRTCEventListener {
     void onUserLeave(String userId);
 
     /**
+     * 网络质量分级变化（弱网检测）。
+     *
+     * @param level  「优 / 良 / 差 / 极差」
+     * @param detail RTT、丢包率、码率等指标明细
+     */
+    void onNetworkQualityChanged(String level, String detail);
+
+    /**
+     * ICE 连接中断，正在进行第 attempt 次自动重连（restartIce 重协商）。
+     */
+    void onIceReconnecting(int attempt);
+
+    /**
      * 发生错误。
      */
     void onError(String message);

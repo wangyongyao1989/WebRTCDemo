@@ -43,6 +43,7 @@ public class CallActivity extends AppCompatActivity implements WebRTCEventListen
     private FrameLayout fullscreenRenderer;
     private FrameLayout pipRenderer;
     private TextView tvStatus;
+    private TextView tvNetwork;
     private Chronometer tvDuration;
     private ImageButton btnMute;
     private ImageButton btnHangup;
@@ -87,6 +88,7 @@ public class CallActivity extends AppCompatActivity implements WebRTCEventListen
         fullscreenRenderer = findViewById(R.id.fullscreen_video_view);
         pipRenderer = findViewById(R.id.pip_video_view);
         tvStatus = findViewById(R.id.tv_status);
+        tvNetwork = findViewById(R.id.tv_network);
         tvDuration = findViewById(R.id.tv_duration);
         btnMute = findViewById(R.id.btn_mute);
         btnHangup = findViewById(R.id.btn_hangup);
@@ -197,6 +199,33 @@ public class CallActivity extends AppCompatActivity implements WebRTCEventListen
         runOnUiThread(() -> {
             Toast.makeText(this, "对方已离开", Toast.LENGTH_SHORT).show();
             hangup();
+        });
+    }
+
+    @Override
+    public void onNetworkQualityChanged(String level, String detail) {
+        runOnUiThread(() -> {
+            tvNetwork.setVisibility(View.VISIBLE);
+            tvNetwork.setText("网络: " + level + "  " + detail);
+            int color;
+            switch (level) {
+                case "优": color = 0xFF4ADE80; break;
+                case "良": color = 0xFFFACC15; break;
+                case "差": color = 0xFFFB923C; break;
+                default: color = 0xFFF87171; break; // 极差
+            }
+            tvNetwork.setTextColor(color);
+            Log.i(TAG, "网络质量: " + level + " " + detail);
+        });
+    }
+
+    @Override
+    public void onIceReconnecting(int attempt) {
+        runOnUiThread(() -> {
+            tvNetwork.setVisibility(View.VISIBLE);
+            tvNetwork.setText("网络中断，重连中(第" + attempt + "次)...");
+            tvNetwork.setTextColor(0xFFF87171);
+            Toast.makeText(this, "网络中断，正在自动重连(第" + attempt + "次)", Toast.LENGTH_SHORT).show();
         });
     }
 

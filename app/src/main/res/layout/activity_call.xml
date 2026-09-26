@@ -37,6 +37,22 @@
         android:shadowDy="1"
         android:shadowRadius="2" />
 
+    <!-- 左上角弱网质量标签：优/良/差/极差 + 指标明细 -->
+    <TextView
+        android:id="@+id/tv_network"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="24dp"
+        android:background="#66000000"
+        android:paddingHorizontal="8dp"
+        android:paddingVertical="3dp"
+        android:text="网络: 检测中"
+        android:textColor="#4ade80"
+        android:textSize="12sp"
+        android:visibility="gone" />
+
     <!-- 底部控制栏：静音 / 挂断 / 切换摄像头 -->
     <LinearLayout
         android:layout_width="match_parent"

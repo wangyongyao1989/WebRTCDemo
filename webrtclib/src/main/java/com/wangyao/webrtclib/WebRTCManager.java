@@ -4,6 +4,7 @@ import android.content.Context;
 import android.media.AudioManager;
 import android.util.Log;
 
+import com.wangyao.webrtclib.peer.NetworkQualityMonitor;
 import com.wangyao.webrtclib.peer.PeerConnectionManager;
 import com.wangyao.webrtclib.render.ProxyVideoSink;
 import com.wangyao.webrtclib.signaling.WebSocketManager;
@@ -78,6 +79,8 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
 
     private boolean isSwitchingCamera = false;
     private boolean released = false;
+    /** 当前已应用的弱网策略档位，避免重复下发。 */
+    private NetworkQualityMonitor.Quality appliedQuality = null;
 
     private WebRTCManager() {
     }
@@ -99,6 +102,7 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
         this.appContext = context.getApplicationContext();
         this.listener = listener;
         this.released = false;
+        this.appliedQuality = null;
         Log.i(TAG, "init");
 
         audioManager = (AudioManager) appContext.getSystemService(Context.AUDIO_SERVICE);
@@ -205,6 +209,7 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
     /** 挂断：关闭所有 peer 并断开信令（保留 factory/流，便于再次通话或由 release 清理）。 */
     public void hangup() {
         Log.i(TAG, "hangup");
+        appliedQuality = null;
         if (peerManager != null) peerManager.closeAll();
         if (socketManager != null) socketManager.disconnect();
     }
@@ -291,6 +296,53 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
     @Override
     public void onUserLeave(String userId) {
         if (listener != null) listener.onUserLeave(userId);
+    }
+
+    @Override
+    public void onNetworkQuality(String userId, NetworkQualityMonitor.Quality quality, String detail) {
+        applyQualityPolicy(quality);
+        if (listener != null) listener.onNetworkQualityChanged(quality.label, detail);
+    }
+
+    @Override
+    public void onIceReconnecting(String userId, int attempt) {
+        if (listener != null) listener.onIceReconnecting(attempt);
+    }
+
+    // ============================ 弱网自适应策略 ============================
+
+    /**
+     * 按质量档位下发三管齐下的降级/恢复：
+     *   1. RtpSender.setParameters 限制视频编码最大码率（不触发重协商）；
+     *   2. VideoSource.adaptOutputFormat 调整采集端分辨率/帧率，从源头减流量；
+     *   3. 极差档关闭视频轨道，保音频通话（音频所需带宽 << 视频）。
+     */
+    private void applyQualityPolicy(NetworkQualityMonitor.Quality q) {
+        if (q == appliedQuality) return;
+        appliedQuality = q;
+        int maxBps;
+        int width, height, fps;
+        boolean videoOn;
+        switch (q) {
+            case EXCELLENT:
+                maxBps = 1_500_000; width = VIDEO_WIDTH; height = VIDEO_HEIGHT; fps = VIDEO_FPS; videoOn = true;
+                break;
+            case GOOD:
+                maxBps = 800_000; width = VIDEO_WIDTH; height = VIDEO_HEIGHT; fps = VIDEO_FPS; videoOn = true;
+                break;
+            case POOR:
+                maxBps = 300_000; width = 480; height = 360; fps = 8; videoOn = true;
+                break;
+            case BAD:
+            default:
+                maxBps = 64_000; width = 480; height = 360; fps = 8; videoOn = false; // 仅音频
+                break;
+        }
+        Log.i(TAG, "applyQualityPolicy: " + q.label + " maxBitrate=" + maxBps
+                + " capture=" + width + "x" + height + "@" + fps + " videoOn=" + videoOn);
+        if (peerManager != null) peerManager.setVideoMaxBitrate(maxBps);
+        if (localVideoTrack != null) localVideoTrack.setEnabled(videoOn);
+        if (videoSource != null) videoSource.adaptOutputFormat(width, height, fps);
     }
 
     // ============================ 内部构建 ============================

@@ -10,10 +10,14 @@ import org.webrtc.EglBase;
 import org.webrtc.IceCandidate;
 import org.webrtc.MediaConstraints;
 import org.webrtc.MediaStream;
+import org.webrtc.MediaStreamTrack;
 import org.webrtc.PeerConnection;
 import org.webrtc.PeerConnectionFactory;
+import org.webrtc.RTCStatsCollectorCallback;
 import org.webrtc.RendererCommon;
+import org.webrtc.RtpParameters;
 import org.webrtc.RtpReceiver;
+import org.webrtc.RtpSender;
 import org.webrtc.SdpObserver;
 import org.webrtc.SessionDescription;
 import org.webrtc.SurfaceViewRenderer;
@@ -44,6 +48,9 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
         void onRemoteStream(String userId);
 
         void onUserLeave(String userId);
+
+        /** ICE 连接状态变化（含 DISCONNECTED/FAILED），由管理器决定重连策略。 */
+        void onIceConnectionStateChanged(String userId, PeerConnection.IceConnectionState state);
     }
 
     private final PeerConnection pc;
@@ -51,8 +58,8 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
     private final boolean isOffer;
     private final PeerCallback callback;
 
-    /** 远端描述设置前到达的 ICE 候选暂存队列。 */
-    private volatile List<IceCandidate> queuedRemoteCandidates;
+    /** 远端描述未就绪（非 STABLE）时到达的 ICE 候选暂存队列；重协商期间同样复用。 */
+    private final List<IceCandidate> remoteCandidateQueue = new ArrayList<>();
     private SessionDescription localSdp;
     /** Unified Plan 下 onAddTrack 会触发多次，远端流就绪只上抛一次。 */
     private volatile boolean remoteStreamNotified = false;
@@ -66,7 +73,6 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
         this.userId = userId;
         this.isOffer = isOffer;
         this.callback = callback;
-        this.queuedRemoteCandidates = new ArrayList<>();
         this.pc = factory.createPeerConnection(iceServers, this);
         Log.d(TAG, "create Peer: " + userId + ", isOffer=" + isOffer + ", pc=" + pc);
     }
@@ -100,13 +106,48 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
         pc.setRemoteDescription(this, sdp);
     }
 
-    /** 添加远端 ICE 候选：远端描述未设置时入队，否则直接添加。 */
+    /** 添加远端 ICE 候选：信令非 STABLE（协商/重协商进行中）时入队，否则直接添加。 */
     public synchronized void addRemoteIceCandidate(IceCandidate candidate) {
         if (pc == null) return;
-        if (queuedRemoteCandidates != null) {
-            queuedRemoteCandidates.add(candidate);
-        } else {
+        if (pc.signalingState() == PeerConnection.SignalingState.STABLE
+                && remoteCandidateQueue.isEmpty()) {
             pc.addIceCandidate(candidate);
+        } else {
+            remoteCandidateQueue.add(candidate);
+        }
+    }
+
+    /** ICE 重启 + 重新发起 Offer（弱网断连恢复用，仅呼叫角色可调用）。 */
+    public void restartIceAndRenegotiate() {
+        if (pc == null) return;
+        Log.w(TAG, "restartIceAndRenegotiate: " + userId);
+        pc.restartIce();
+        pc.createOffer(this, offerOrAnswerConstraints());
+    }
+
+    /** 读取 WebRTC 统计报告（NetworkQualityMonitor 用）。 */
+    public void getStats(RTCStatsCollectorCallback callback) {
+        if (pc != null) pc.getStats(callback);
+    }
+
+    public PeerConnection.IceConnectionState iceState() {
+        return pc != null ? pc.iceConnectionState() : PeerConnection.IceConnectionState.CLOSED;
+    }
+
+    /** 限制本 peer 视频发送码率（RtpSender 参数调整，不触发重协商）。 */
+    public void setVideoMaxBitrate(int maxBps) {
+        if (pc == null) return;
+        for (RtpSender sender : pc.getSenders()) {
+            MediaStreamTrack track = sender.track();
+            if (track instanceof VideoTrack) {
+                RtpParameters params = sender.getParameters();
+                if (params == null || params.encodings.isEmpty()) continue;
+                for (RtpParameters.Encoding enc : params.encodings) {
+                    enc.maxBitrateBps = maxBps;
+                }
+                boolean ok = sender.setParameters(params);
+                Log.i(TAG, "setVideoMaxBitrate: " + userId + " " + maxBps + "bps -> " + ok);
+            }
         }
     }
 
@@ -186,14 +227,13 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
                 pc.createAnswer(this, offerOrAnswerConstraints());
                 break;
             case STABLE:
-                if (isOffer) {
-                    // 呼叫方收到 Answer -> 连接就绪
-                    drainCandidates();
-                } else {
-                    // 接收方刚设置本地 Answer -> 发送给对端
+                // 以本地 SDP 类型判断本轮角色（而非初始 isOffer）：
+                // 重协商时即使本机是初始应答方，也可能主动发出 Offer。
+                if (localSdp != null && localSdp.type == SessionDescription.Type.ANSWER) {
+                    // 本机刚设置本地 Answer -> 发送给对端
                     callback.onSendAnswer(userId, localSdp);
-                    drainCandidates();
                 }
+                drainCandidates();
                 break;
             default:
                 break;
@@ -220,10 +260,9 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
     @Override
     public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
         Log.i(TAG, "onIceConnectionChange: " + userId + ", " + state);
-        if (state == PeerConnection.IceConnectionState.DISCONNECTED
-                || state == PeerConnection.IceConnectionState.FAILED) {
-            callback.onUserLeave(userId);
-        }
+        // 不再直接上抛离会：DISCONNECTED/FAILED 交由管理器尝试 ICE 重启恢复，
+        // 连续失败后由管理器决定是否真正拆除 peer。
+        callback.onIceConnectionStateChanged(userId, state);
     }
 
     @Override
@@ -297,12 +336,12 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
     // ----------------------------- 内部方法 -----------------------------
 
     private synchronized void drainCandidates() {
-        if (queuedRemoteCandidates == null) return;
-        Log.d(TAG, "drainCandidates: " + userId + ", count=" + queuedRemoteCandidates.size());
-        for (IceCandidate c : queuedRemoteCandidates) {
+        if (remoteCandidateQueue.isEmpty()) return;
+        Log.d(TAG, "drainCandidates: " + userId + ", count=" + remoteCandidateQueue.size());
+        for (IceCandidate c : remoteCandidateQueue) {
             if (pc != null) pc.addIceCandidate(c);
         }
-        queuedRemoteCandidates = null;
+        remoteCandidateQueue.clear();
     }
 
     private MediaConstraints offerOrAnswerConstraints() {
