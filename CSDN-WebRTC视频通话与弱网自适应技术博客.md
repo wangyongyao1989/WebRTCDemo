@@ -1,6 +1,8 @@
 # 手把手搭建 WebRTC 视频通话：Android App + Python 信令服务器 + Web 端，外加弱网自适应实战
 
 > 本文基于一个可运行的开源结构（Android 端 `webrtclib` 模块 + Python `server.py` 信令 + 原生 JS 网页端）完整走一遍：三端怎么搭、WebRTC 连接怎么建立、以及最有工程价值的部分——**App 端弱网自适应策略**（自动降级、自动恢复、断线重连）的实现与真机实测。
+>
+> 项目源码仓库：**https://github.com/wangyongyao1989/WebRTCDemo.git**（`git clone https://github.com/wangyongyao1989/WebRTCDemo.git`，欢迎 Star）
 
 先看最终效果：平板与电脑浏览器互相视频通话，平板左上角实时显示 `网络: 优/良/差/极差 + RTT/丢包/上下行码率`；用 dummynet 把 UDP 带宽压到 100kbps、丢包 25% 时，平板自动关视频保音频；网络恢复后画质逐级回升，视频自动重开；链路彻底中断时自动 ICE 重连。全程无一行"假代码"，均为实测通过。
 
@@ -433,4 +435,4 @@ pfctl -e
 6. **两条血泪线程规则**：绝不在持 Java 锁时调用 `PeerConnection` 的同步 JNI 方法；`addStream` 在 Unified Plan 下是 native 崩溃不是异常。
 7. **测试环境本身就是产出**：dummynet 只损 UDP 不损信令，才能同时验证"降级"和"重连"两条路径。
 
-完整代码结构：`server.py`（信令）+ `webrtclib`（WebRTC 四层封装）+ `app`（双人通话 UI）+ `test-client/`（网页对端、weaknet.sh、CDP 驱动脚本）。欢迎评论区交流 TURN 部署与多人房间扩展。
+完整代码结构：`server.py`（信令）+ `webrtclib`（WebRTC 四层封装）+ `app`（双人通话 UI）+ `test-client/`（网页对端、weaknet.sh、CDP 驱动脚本）。全部源码已开源：**https://github.com/wangyongyao1989/WebRTCDemo.git**。欢迎评论区交流 TURN 部署与多人房间扩展。
