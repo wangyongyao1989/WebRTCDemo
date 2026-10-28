@@ -209,6 +209,11 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
             @Override
             public void onCameraSwitchDone(boolean isFrontCamera) {
                 isSwitchingCamera = false;
+                // 前置预览需要镜像，后置不应镜像；在采集线程回调后切回 UI 线程改渲染器
+                final SurfaceViewRenderer r = localRenderer;
+                if (r != null) {
+                    r.post(() -> r.setMirror(isFrontCamera));
+                }
                 Log.i(TAG, "switchCamera done, front=" + isFrontCamera);
             }
 
