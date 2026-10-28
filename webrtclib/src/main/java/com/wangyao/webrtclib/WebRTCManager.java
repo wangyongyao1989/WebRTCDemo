@@ -72,6 +72,8 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
     private SurfaceTextureHelper surfaceTextureHelper;
     /** 本地预览的 sink 代理，便于切换渲染目标。 */
     private ProxyVideoSink localSink;
+    /** 本地预览渲染器（用于摄像头翻转后校正镜像、release 时统一回收）。 */
+    private SurfaceViewRenderer localRenderer;
 
     private WebSocketManager socketManager;
     private PeerConnectionManager peerManager;
@@ -139,8 +141,20 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
         renderer.setMirror(true);
         renderer.setZOrderMediaOverlay(overlay);
 
+        // 重复调用时先解绑旧 sink、释放旧渲染器，防止 VideoTrack 上 sink 累积与 GL 泄漏
+        if (localVideoTrack != null && localSink != null) {
+            localVideoTrack.removeSink(localSink);
+        }
+        if (localRenderer != null && localRenderer != renderer) {
+            try {
+                localRenderer.release();
+            } catch (Exception e) {
+                Log.w(TAG, "old localRenderer.release: " + e.getMessage());
+            }
+        }
         localSink = new ProxyVideoSink();
         localSink.setTarget(renderer);
+        localRenderer = renderer;
         if (localVideoTrack != null) {
             localVideoTrack.addSink(localSink);
         }
@@ -195,6 +209,11 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
             @Override
             public void onCameraSwitchDone(boolean isFrontCamera) {
                 isSwitchingCamera = false;
+                // 前置预览需要镜像，后置不应镜像；在采集线程回调后切回 UI 线程改渲染器
+                final SurfaceViewRenderer r = localRenderer;
+                if (r != null) {
+                    r.post(() -> r.setMirror(isFrontCamera));
+                }
                 Log.i(TAG, "switchCamera done, front=" + isFrontCamera);
             }
 
@@ -220,7 +239,7 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
         released = true;
         Log.i(TAG, "release");
 
-        if (peerManager != null) peerManager.closeAll();
+        if (peerManager != null) peerManager.shutdown();
         if (socketManager != null) socketManager.disconnect();
 
         // 释放摄像头与媒体源
@@ -245,9 +264,20 @@ public class WebRTCManager implements PeerConnectionManager.PeerManagerListener 
             audioSource.dispose();
             audioSource = null;
         }
+        if (localVideoTrack != null && localSink != null) {
+            localVideoTrack.removeSink(localSink);
+        }
         if (localSink != null) {
             localSink.setTarget(null);
             localSink = null;
+        }
+        if (localRenderer != null) {
+            try {
+                localRenderer.release();
+            } catch (Exception e) {
+                Log.w(TAG, "localRenderer.release: " + e.getMessage());
+            }
+            localRenderer = null;
         }
 
         if (audioManager != null) {

@@ -197,6 +197,11 @@ public class CallActivity extends AppCompatActivity implements WebRTCEventListen
     @Override
     public void onUserLeave(String userId) {
         runOnUiThread(() -> {
+            // 只处理当前正在通话的对端离开；其他成员（历史 peer）离会不影响本通话
+            if (callEnded || (remoteUserId != null && !remoteUserId.equals(userId))) {
+                Log.i(TAG, "onUserLeave ignored: " + userId + " (current=" + remoteUserId + ")");
+                return;
+            }
             Toast.makeText(this, "对方已离开", Toast.LENGTH_SHORT).show();
             hangup();
         });

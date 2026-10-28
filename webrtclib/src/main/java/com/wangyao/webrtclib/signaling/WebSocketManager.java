@@ -169,6 +169,15 @@ public class WebSocketManager {
     @SuppressWarnings("unchecked")
     private void handleMessage(String message) {
         if (callback == null) return;
+        // 单条畸形消息（非法 JSON / 字段类型不符）不应打断整条信令连接
+        try {
+            dispatch(message);
+        } catch (Exception e) {
+            Log.e(TAG, "handleMessage failed: " + e.getMessage() + ", raw=" + message);
+        }
+    }
+
+    private void dispatch(String message) {
         Map<String, Object> map = JSON.parseObject(message, Map.class);
         String eventName = (String) map.get("eventName");
         if (eventName == null) return;

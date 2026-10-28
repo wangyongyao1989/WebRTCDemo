@@ -68,6 +68,8 @@ async def handle_connection(websocket):
                                 "socketId": client_id
                             }
                         }))
+                    else:
+                        print(f"转发 _ice_candidate 目标不存在: {target_id}")
                 
                 elif event_name == '__offer':
                     # 转发Offer
@@ -80,6 +82,8 @@ async def handle_connection(websocket):
                                 "socketId": client_id
                             }
                         }))
+                    else:
+                        print(f"转发 _offer 目标不存在: {target_id}")
                 
                 elif event_name == '__answer':
                     # 转发Answer
@@ -92,6 +96,8 @@ async def handle_connection(websocket):
                                 "socketId": client_id
                             }
                         }))
+                    else:
+                        print(f"转发 _answer 目标不存在: {target_id}")
                 
             except json.JSONDecodeError:
                 print(f"无效的JSON消息: {message}")

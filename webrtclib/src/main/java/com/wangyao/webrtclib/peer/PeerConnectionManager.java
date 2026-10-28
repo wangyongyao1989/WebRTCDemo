@@ -174,7 +174,13 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
     @Override
     public void onRemovePeer(String socketId) {
         Log.i(TAG, "onRemovePeer: " + socketId);
-        executor.execute(() -> removePeer(socketId));
+        // 服务器通知成员离开：除了拆链，必须上抛 UI——否则对端异常退出后
+        // 本端会永远停留在黑屏通话页（实测复现过）。
+        executor.execute(() -> {
+            boolean existed = peers.containsKey(socketId);
+            removePeer(socketId);
+            if (existed && listener != null) listener.onUserLeave(socketId);
+        });
     }
 
     @Override
@@ -222,7 +228,8 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
      * ICE 异常处理策略：
      *   - CONNECTED/COMPLETED：清零重启计数；
      *   - DISCONNECTED：给 4s 宽限期（WebRTC 可自愈），仍未恢复则 restartIce；
-     *   - FAILED：立即 restartIce + 重新 Offer；
+     *   - FAILED：发起方立即 restartIce + 重新 Offer；应答方不主动重启
+     *     （避免双方同时发 Offer 造成 glare 互拒），只等对端 Offer，超时则拆链；
      *   - 重启后 10s 复查，仍未连通则再试，最多 {@link #MAX_ICE_RESTART} 次，
      *     超限才真正按离会拆链。
      */
@@ -272,6 +279,20 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
     private void attemptIceRestart(String userId) {
         Peer peer = peers.get(userId);
         if (peer == null) return;
+        // glare 防护：只有初始 Offer 发起方可重启重协商；应答方等待对端重启的 Offer，
+        // 超时仍未连通则按离会拆链。
+        if (!peer.isInitiator()) {
+            int w = iceRestartAttempts.merge(userId, 1, Integer::sum);
+            if (w > MAX_ICE_RESTART) {
+                Log.e(TAG, "attemptIceRestart: 应答方等待超时，放弃重连 " + userId);
+                iceRestartAttempts.remove(userId);
+                onUserLeave(userId);
+                return;
+            }
+            Log.w(TAG, "attemptIceRestart: 非发起方，等待对端重启 Offer (第" + w + "次复查) " + userId);
+            scheduleIceCheck(userId, ICE_RESTART_VERIFY_MS);
+            return;
+        }
         int n = iceRestartAttempts.merge(userId, 1, Integer::sum);
         if (n > MAX_ICE_RESTART) {
             Log.e(TAG, "attemptIceRestart: 已达上限 " + MAX_ICE_RESTART + " 次，放弃重连 " + userId);
@@ -324,7 +345,7 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
         });
     }
 
-    /** 关闭所有 peer 并清空。 */
+    /** 关闭所有 peer 并清空（保留 executor，可再次通话复用）。 */
     public void closeAll() {
         executor.execute(() -> {
             for (String id : new java.util.ArrayList<>(monitors.keySet())) {
@@ -339,6 +360,13 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
             }
             peers.clear();
         });
+    }
+
+    /** 彻底销毁：关闭所有 peer 并停掉自有线程池（WebRTCManager.release 时调用）。 */
+    public void shutdown() {
+        closeAll();
+        executor.shutdown();
+        scheduler.shutdownNow();
     }
 
     public String getMyId() {
