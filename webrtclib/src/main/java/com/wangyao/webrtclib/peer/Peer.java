@@ -88,6 +88,11 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
         return userId;
     }
 
+    /** 本机是否为该 peer 的初始 Offer 发起方（joiner）。ICE 重启只允许发起方执行，避免双方同时重协商互撞。 */
+    public boolean isInitiator() {
+        return isOffer;
+    }
+
     public void addLocalStream(MediaStream localStream) {
         if (pc == null || localStream == null) return;
         // Unified Plan（新版 WebRTC 默认语义）下 addStream 会触发 native CHECK 崩溃，
