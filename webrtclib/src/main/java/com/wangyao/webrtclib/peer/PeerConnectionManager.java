@@ -345,7 +345,7 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
         });
     }
 
-    /** 关闭所有 peer 并清空。 */
+    /** 关闭所有 peer 并清空（保留 executor，可再次通话复用）。 */
     public void closeAll() {
         executor.execute(() -> {
             for (String id : new java.util.ArrayList<>(monitors.keySet())) {
@@ -360,6 +360,13 @@ public class PeerConnectionManager implements SignalCallback, Peer.PeerCallback 
             }
             peers.clear();
         });
+    }
+
+    /** 彻底销毁：关闭所有 peer 并停掉自有线程池（WebRTCManager.release 时调用）。 */
+    public void shutdown() {
+        closeAll();
+        executor.shutdown();
+        scheduler.shutdownNow();
     }
 
     public String getMyId() {

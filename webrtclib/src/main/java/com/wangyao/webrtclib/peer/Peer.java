@@ -172,6 +172,19 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     /** 为该 peer 创建远端视频渲染器（由 UI 层调用并加入布局）。 */
     public SurfaceViewRenderer createRender(EglBase eglBase, Context context, boolean isOverlay) {
+        // 重复调用时先释放旧渲染器，防止 EglRenderer/GL 纹理泄漏
+        if (renderer != null) {
+            Log.w(TAG, "createRender called twice for " + userId + ", releasing old renderer");
+            if (sink != null) {
+                sink.setTarget(null);
+            }
+            try {
+                renderer.release();
+            } catch (Exception e) {
+                Log.w(TAG, "old renderer.release: " + e.getMessage());
+            }
+            renderer = null;
+        }
         renderer = new SurfaceViewRenderer(context);
         renderer.init(eglBase.getEglBaseContext(), new RendererCommon.RendererEvents() {
             @Override
@@ -304,16 +317,23 @@ public class Peer implements SdpObserver, PeerConnection.Observer {
 
     @Override
     public void onAddStream(MediaStream stream) {
+        // Unified Plan 下 onAddTrack 与 onAddStream 可能先后都触发（实测本版本如此）。
+        // 远端流就绪以先到的 onAddTrack 为准，这里去重，避免重复 addSink / 重复建渲染器。
         Log.i(TAG, "onAddStream: " + userId
                 + ", audio=" + stream.audioTracks.size() + ", video=" + stream.videoTracks.size());
         if (stream.audioTracks.size() > 0) {
             stream.audioTracks.get(0).setEnabled(true);
         }
         remoteStream = stream;
+        if (remoteStreamNotified) {
+            return;
+        }
         // 若渲染器已创建（先 createRender 后到流），立即把流接到 sink
         if (sink != null && stream.videoTracks.size() > 0) {
+            remoteStreamNotified = true;
             stream.videoTracks.get(0).addSink(sink);
         }
+        remoteStreamNotified = true;
         callback.onRemoteStream(userId);
     }
 
