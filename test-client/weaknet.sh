@@ -8,11 +8,22 @@
 #   sudo ./weaknet.sh off                                     # 清除全部注入
 #   sudo ./weaknet.sh status                                  # 查看当前 pipe/规则
 #
+# IP 自动探测（可用环境变量覆盖）：MAC_IP / TABLET_IP。
 # 本会话中通过 osascript 'with administrator privileges' 提权执行。
 set -e
 
-MAC_IP=192.168.1.4
-TABLET_IP=192.168.1.3
+# 自动探测本机 en0/en1 IP；sudo 下取调用者设备
+MAC_IP=${MAC_IP:-$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)}
+# 自动探测平板 wlan0 IPv4（adb 已连接时）
+detect_tablet_ip() {
+  local adb_bin
+  adb_bin=$(command -v adb 2>/dev/null) || adb_bin="/Users/${SUDO_USER:-$USER}/Library/Android/sdk/platform-tools/adb"
+  [ -x "$adb_bin" ] || return 1
+  "$adb_bin" -e shell ip -4 addr show wlan0 2>/dev/null | awk '/inet /{split($2,a,"/");print a[1];exit}'
+}
+TABLET_IP=${TABLET_IP:-$(detect_tablet_ip || true)}
+[ -n "$MAC_IP" ]    || { echo "错误: 未探测到 MAC_IP，请用环境变量指定，如 MAC_IP=192.168.x.x sudo -E $0 ..."; exit 1; }
+[ -n "$TABLET_IP" ] || { echo "错误: 未探测到 TABLET_IP（平板未连 adb？），请用环境变量 TABLET_IP=192.168.x.x 指定"; exit 1; }
 BW=${2:-300}      # kbit/s
 DELAY=${3:-150}   # ms
 PLR=${4:-0.10}    # 丢包率
